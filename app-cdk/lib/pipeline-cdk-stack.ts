@@ -7,10 +7,16 @@ import * as codepipeline_actions from 'aws-cdk-lib/aws-codepipeline-actions';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ecsPatterns from 'aws-cdk-lib/aws-ecs-patterns';
+import * as codedeploy from 'aws-cdk-lib/aws-codedeploy';
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+
 
 interface ConsumerProps extends StackProps {
   ecrRepository: ecr.Repository,
   fargateServiceTest: ecsPatterns.ApplicationLoadBalancedFargateService,
+  greenTargetGroup: elbv2.ApplicationTargetGroup,
+  greenLoadBalancerListener: elbv2.ApplicationListener,
+  fargateServiceProd: ecsPatterns.ApplicationLoadBalancedFargateService,
 }
 
 export class PipelineCdkStack extends Stack {
@@ -123,9 +129,37 @@ export class PipelineCdkStack extends Stack {
           service: props.fargateServiceTest.service,
           input: dockerBuildOutput,
         }),
+      ],
+    });
+
+    const ecsCodeDeployApp = new codedeploy.EcsApplication(this, "my-app", { applicationName: 'my-app' });
+    const prodEcsDeploymentGroup = new codedeploy.EcsDeploymentGroup(this, "my-app-dg", {
+      service: props.fargateServiceProd.service,
+      blueGreenDeploymentConfig: {
+        blueTargetGroup: props.fargateServiceProd.targetGroup,
+        greenTargetGroup: props.greenTargetGroup,
+        listener: props.fargateServiceProd.listener,
+        testListener: props.greenLoadBalancerListener
+      },
+      deploymentConfig: codedeploy.EcsDeploymentConfig.LINEAR_10PERCENT_EVERY_1MINUTES,
+      application: ecsCodeDeployApp,
+    });
+    pipeline.addStage({
+      stageName: 'Deploy-Production',
+      actions: [
+        new codepipeline_actions.ManualApprovalAction({
+          actionName: 'Approve-Prod-Deploy',
+          runOrder: 1
+        }),
+        new codepipeline_actions.CodeDeployEcsDeployAction({
+          actionName: 'BlueGreen-deployECS',
+          deploymentGroup: prodEcsDeploymentGroup,
+          appSpecTemplateInput: sourceOutput,
+          taskDefinitionTemplateInput: sourceOutput,
+          runOrder: 2
+        })
       ]
     });
-    
     new CfnOutput(this, 'SourceConnectionArn', {
         value: SourceConnection.attrConnectionArn,
     });
