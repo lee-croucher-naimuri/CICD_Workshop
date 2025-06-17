@@ -39,7 +39,7 @@ export class PipelineCdkStack extends Stack {
         actions: [
           new codepipeline_actions.CodeStarConnectionsSourceAction({
             actionName: 'GitHub',
-            owner: 'Lee C',
+            owner: 'lee-croucher-naimuri',
             repo: 'CICD_Workshop',
             output: sourceOutput,
             branch: 'main',
