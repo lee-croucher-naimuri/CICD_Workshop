@@ -1,4 +1,4 @@
-import { CfnOutput, Stack, StackProps } from 'aws-cdk-lib';
+import { Stack, StackProps, CfnOutput } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { aws_codeconnections as codeconnections } from 'aws-cdk-lib';
 import * as codepipeline from 'aws-cdk-lib/aws-codepipeline';
@@ -6,10 +6,11 @@ import * as codebuild from 'aws-cdk-lib/aws-codebuild';
 import * as codepipeline_actions from 'aws-cdk-lib/aws-codepipeline-actions';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as ecsPatterns from 'aws-cdk-lib/aws-ecs-patterns';
 
 interface ConsumerProps extends StackProps {
-  ecrRepository: ecr.Repository;
+  ecrRepository: ecr.Repository,
+  fargateServiceTest: ecsPatterns.ApplicationLoadBalancedFargateService,
 }
 
 export class PipelineCdkStack extends Stack {
@@ -28,46 +29,13 @@ export class PipelineCdkStack extends Stack {
       executionMode: codepipeline.ExecutionMode.QUEUED,
     });
 
-    const codeBuild = new codebuild.PipelineProject(
-      this,
-      'CodeBuild',
-      {
-        environment: {
-          buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
-          privileged: true,
-          computeType: codebuild.ComputeType.LARGE,
-        },
-        buildSpec: codebuild.BuildSpec.fromSourceFilename('buildspec_test.yml'),
-      }
-    );
-
-    const sourceOutput = new codepipeline.Artifact();
-    const unitTestOutput = new codepipeline.Artifact();
-
-    pipeline.addStage({
-        stageName: 'Source',
-        actions: [
-          new codepipeline_actions.CodeStarConnectionsSourceAction({
-            actionName: 'GitHub',
-            owner: 'lee-croucher-naimuri',
-            repo: 'CICD_Workshop',
-            output: sourceOutput,
-            branch: 'main',
-            connectionArn: 'arn:aws:codeconnections:us-east-2:291598226176:connection/c4fa502a-ead6-4d08-92e6-6b11f793b0f4',
-          }),
-        ],
-    });
-
-    pipeline.addStage({
-      stageName: 'Code-Quality-Testing',
-      actions: [
-        new codepipeline_actions.CodeBuildAction({
-          actionName: 'Unit-Test',
-          project: codeBuild,
-          input: sourceOutput,
-          outputs: [unitTestOutput],
-        }),
-      ],
+    const codeBuild = new codebuild.PipelineProject(this, 'CodeBuild', {
+      environment: {
+        buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
+        privileged: true,
+        computeType: codebuild.ComputeType.LARGE,
+      },
+      buildSpec: codebuild.BuildSpec.fromSourceFilename('buildspec_test.yml'),
     });
 
     const dockerBuild = new codebuild.PipelineProject(this, 'DockerBuild', {
@@ -105,7 +73,35 @@ export class PipelineCdkStack extends Stack {
 
     dockerBuild.addToRolePolicy(dockerBuildRolePolicy);
 
+    const sourceOutput = new codepipeline.Artifact();
+    const unitTestOutput = new codepipeline.Artifact();
     const dockerBuildOutput = new codepipeline.Artifact();
+
+    pipeline.addStage({
+        stageName: 'Source',
+        actions: [
+          new codepipeline_actions.CodeStarConnectionsSourceAction({
+            actionName: 'GitHub',
+            owner: 'lee-croucher-naimuri',
+            repo: 'CICD_Workshop',
+            output: sourceOutput,
+            branch: 'main',
+            connectionArn: 'arn:aws:codeconnections:us-east-2:291598226176:connection/c4fa502a-ead6-4d08-92e6-6b11f793b0f4',
+          }),
+        ],
+    });
+
+    pipeline.addStage({
+      stageName: 'Code-Quality-Testing',
+      actions: [
+        new codepipeline_actions.CodeBuildAction({
+          actionName: 'Unit-Test',
+          project: codeBuild,
+          input: sourceOutput,
+          outputs: [unitTestOutput],
+        }),
+      ],
+    });
 
     pipeline.addStage({
       stageName: 'Docker-Push-ECR',
@@ -119,31 +115,17 @@ export class PipelineCdkStack extends Stack {
       ],
     });
 
-    const signerARNParameter = new ssm.StringParameter(this, 'SignerARNParam', {
-      parameterName: 'signer-profile-arn',
-      stringValue: 'arn:aws:signer:us-east-2:291598226176:/signing-profiles/ecr_signing_profile',
-    });
-
-    const signerParameterPolicy = new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      resources: [signerARNParameter.parameterArn],
-      actions: ['ssm:GetParametersByPath', 'ssm:GetParameters'],
-    });
-
-    dockerBuild.addToRolePolicy(signerParameterPolicy);
-
-    const signerPolicy = new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      resources: ['*'],
+    pipeline.addStage({
+      stageName: 'Deploy-Test',
       actions: [
-        'signer:PutSigningProfile',
-        'signer:SignPayload',
-        'signer:GetRevocationStatus',
-      ],
+        new codepipeline_actions.EcsDeployAction({
+          actionName: 'Deploy-Fargate-Test',
+          service: props.fargateServiceTest.service,
+          input: dockerBuildOutput,
+        }),
+      ]
     });
-
-    dockerBuild.addToRolePolicy(signerPolicy);
-
+    
     new CfnOutput(this, 'SourceConnectionArn', {
         value: SourceConnection.attrConnectionArn,
     });
